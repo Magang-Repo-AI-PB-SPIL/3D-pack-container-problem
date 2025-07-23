@@ -1,6 +1,6 @@
-# 3D Bin Packing Algorithm with Load Balancing
+# 3D Container Packing Algorithm with Load Balancing
 
-![Bin Packing Visualization](https://example.com/packing-visualization.jpg) <!-- Replace with actual image if available -->
+![Bin Packing Visualization](packing-container.webp) <!-- Replace with actual image if available -->
 
 ## 📦 Overview
 
@@ -19,8 +19,8 @@ Generates all possible horizontal layers of identical boxes in all 6 orientation
 ### Stage 2: Solution Candidates
 Creates feasible packing combinations from the generated layers
 
-### Stage 3: Bin Packing
-Packs boxes into bins using the best candidates while ensuring:
+### Stage 3: Container Packing
+Packs boxes into container using the best candidates while ensuring:
 - Weight limits are respected
 - Load is balanced (50% heaviest + 50% lightest items)
 - Maximum volume utilization
@@ -43,6 +43,7 @@ Packs boxes into bins using the best candidates while ensuring:
 
 ### Installation
 ```bash
-git clone https://github.com/yourusername/3d-bin-packing.git
-cd 3d-bin-packing
+git clone https://github.com/Magang-Repo-AI-PB-SPIL/3D-pack-container-problem.git
+cd 3D-pack-container-problem
+pip install -r requirements.txt
 run 3d_container_packing_problem.py
