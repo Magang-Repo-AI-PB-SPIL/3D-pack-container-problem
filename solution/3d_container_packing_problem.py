@@ -3,11 +3,10 @@ from typing import List, Tuple, Dict
 import numpy as np
 
 class BoxType:
-    def __init__(self, d, l, h, max_weight):
+    def __init__(self, d, l, h):
         self.d = d
         self.l = l
         self.h = h
-        self.max_weight = max_weight
 
 class Container:
     def __init__(self, D, L, H, W):
@@ -86,17 +85,31 @@ def generate_solution_candidates(container, box_types, layers):
 
 def pack_boxes(bin: Container, box_types: List[BoxType], solutions: List[SolutionCandidate], 
                num_boxes: List[int], box_weights: List[List[float]], 
-               layers: Dict[Tuple[int, int], Layer]) -> Tuple[int, List[List[Layer]]]:  # Tambahkan layers sebagai parameter
+               layers: Dict[Tuple[int, int], Layer]) -> Tuple[int, List[List[Layer]]]:
     """
-    Stage 3: Pack boxes into bins using the best solution candidates
+    Packs boxes into bins using the best solution candidates.
+    Args:
+        bin (Container): The container to pack boxes into.
+        box_types (List[BoxType]): List of box types with their dimensions and max weights.
+        solutions (List[SolutionCandidate]): List of precomputed solution candidates.
+        num_boxes (List[int]): Number of boxes available for each type.
+        box_weights (List[List[float]]): Weights of the boxes for each type.
+        layers (Dict[Tuple[int, int], Layer]): Precomputed layers for box types and orientations.
+    Returns:
+        Tuple[int, List[List[Layer]]]: Number of bins used and the packed bins with their layers.
     """
+    # Initialize remaining boxes and weights (create deep copies)
     remaining_boxes = num_boxes.copy()
     remaining_weights = [weights.copy() for weights in box_weights]
     bins = []
     m = 0
     
+    # Verification variables
+    initial_counts = num_boxes.copy()
+    packed_counts = [0] * len(box_types)
+    
     while sum(remaining_boxes) > 0:
-        # Sort remaining boxes by weight (descending) for each type
+        # Sort remaining weights for each box type
         sorted_weights = []
         for i in range(len(box_types)):
             sorted_weights.append(sorted(remaining_weights[i], reverse=True))
@@ -109,18 +122,22 @@ def pack_boxes(bin: Container, box_types: List[BoxType], solutions: List[Solutio
             total_weight = 0.0
             feasible = True
             
+            # Temporary variables for this solution attempt
+            temp_packed = [0] * len(box_types)
+            
             for layer in solution.layers:
                 i = layer.box_type_idx
-                if remaining_boxes[i] < layer.num_boxes:
+                if remaining_boxes[i] - temp_packed[i] < layer.num_boxes:
                     feasible = False
                     break
                 
-                # Calculate weight using half heaviest and half lightest boxes
                 half = layer.num_boxes // 2
                 if half > 0:
                     total_weight += sum(sorted_weights[i][:half]) + sum(sorted_weights[i][-half:])
                 else:
                     total_weight += sum(sorted_weights[i][:layer.num_boxes])
+                
+                temp_packed[i] += layer.num_boxes
             
             if feasible and total_weight <= bin.W:
                 best_solution = solution
@@ -128,73 +145,80 @@ def pack_boxes(bin: Container, box_types: List[BoxType], solutions: List[Solutio
                 break
         
         if best_solution is None:
+            # Fallback packing for remaining boxes
             bin_content = []
             for i in range(len(box_types)):
                 if remaining_boxes[i] > 0:
                     for p in range(1, 7):
                         if (i, p) in layers:
-                            new_layer = Layer(i, p, remaining_boxes[i])
+                            num_to_pack = remaining_boxes[i]
+                            new_layer = Layer(i, p, num_to_pack)
                             new_layer.height = layers[(i, p)].height
-                            # Hitung weight untuk layer ini
-                            new_layer.weight = sum(sorted_weights[i][:remaining_boxes[i]])
-                            del sorted_weights[i][:remaining_boxes[i]]
+                            new_layer.weight = sum(sorted_weights[i][:num_to_pack])
+                            
                             bin_content.append(new_layer)
+                            packed_counts[i] += num_to_pack
+                            remaining_boxes[i] = 0
+                            sorted_weights[i] = []
                             break
             
             if bin_content:
                 bins.append(bin_content)
                 m += 1
-                for layer in bin_content:
-                    remaining_boxes[layer.box_type_idx] -= layer.num_boxes
-                    del remaining_weights[layer.box_type_idx][:layer.num_boxes]
+                remaining_weights = sorted_weights
             break
         
         # Pack the best solution found
         bin_content = []
         for layer in best_solution.layers:
             i = layer.box_type_idx
-            new_layer = Layer(i, layer.orientation, layer.num_boxes)
+            num_to_pack = layer.num_boxes
+            new_layer = Layer(i, layer.orientation, num_to_pack)
             new_layer.height = layer.height
-            new_layer.weight = 0.0
             
-            half = layer.num_boxes // 2
+            half = num_to_pack // 2
             if half > 0:
                 new_layer.weight = sum(sorted_weights[i][:half]) + sum(sorted_weights[i][-half:])
                 del sorted_weights[i][:half]
-                del sorted_weights[i][-(layer.num_boxes - half):]
+                del sorted_weights[i][-(num_to_pack - half):]
             else:
-                new_layer.weight = sum(sorted_weights[i][:layer.num_boxes])
-                del sorted_weights[i][:layer.num_boxes]
+                new_layer.weight = sum(sorted_weights[i][:num_to_pack])
+                del sorted_weights[i][:num_to_pack]
             
             bin_content.append(new_layer)
-            remaining_boxes[i] -= layer.num_boxes
+            remaining_boxes[i] -= num_to_pack
+            packed_counts[i] += num_to_pack
         
         bins.append(bin_content)
         m += 1
         remaining_weights = sorted_weights
     
+    # Final verification
+    for i in range(len(box_types)):
+        if initial_counts[i] != packed_counts[i]:
+            print(f"Error: Box type {i} initial={initial_counts[i]}, packed={packed_counts[i]}")
+            return 0, []
+    
     return m, bins
 
-
-
-
+# panjang, lebar, tinggi, kapasitas kontainer
 D = 243.8
 L = 609.6
 H = 259
-bin = Container(D=D, L=L, H=H, W=6804.0)
+bin = Container(D=D, L=L, H=H, W=6804)
     
 box_types = [
-    BoxType(d=40.16, l=25.88, h=32.86, max_weight=10.0),   # Type 1
-    BoxType(d=54.8, l=33.5, h=42.1, max_weight=25.0),      # Type 2
-    BoxType(d=22.2, l=28.7, h=19.7, max_weight=13.0)       # Type 3
+    BoxType(d=0.15, l=0.3, h=0.2),
+    BoxType(d=1.5, l=0.3, h=0.3),
+    BoxType(d=0.4, l=0.4, h=1)
 ]
 
 # Example problem instance
-num_boxes = [100, 80, 120]  # Number of boxes for each type
+num_boxes = [200, 100, 50]  # Number of boxes for each type
 box_weights = [
-    [8.0] * 100,    # Weights for type 1 boxes (simplified)
-    [20.0] * 80,    # Weights for type 2 boxes
-    [10.0] * 120    # Weights for type 3 boxes
+    [0.5] * 200,    # Weights for type 1 boxes (simplified)
+    [2.0] * 100,    # Weights for type 2 boxes
+    [1.0] * 50    # Weights for type 3 boxes
 ]
 
 print("Running Stage 1: Generating layers...")
