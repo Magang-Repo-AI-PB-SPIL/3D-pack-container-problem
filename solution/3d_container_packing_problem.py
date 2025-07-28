@@ -249,5 +249,3 @@ for i, bin_content in enumerate(packed_bins, 1):
         print(f"  - Type {layer.box_type_idx+1}, Orientation {layer.orientation}: {layer.num_boxes} boxes")
         print(f"    - Dimensions: {box_type.d}x{box_type.l}x{box_type.h}")
         print(f"    - Layer weight: {layer.weight:.1f}")
-        
-    
