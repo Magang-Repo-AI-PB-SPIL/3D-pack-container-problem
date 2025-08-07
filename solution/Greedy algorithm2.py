@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.patches import Patch
+import random
 
 class Item:
     def __init__(self, dx, dy, dz, weight, name=None):
@@ -56,45 +57,6 @@ class ContainerPackingEnv:
         current_utilization = (current_container['volume_used'] / 
                              (self.width * self.depth * self.height)) if current_container else 0
         return (len(self.unplaced), len(self.containers), current_utilization)
-    
-    def _can_place(self, container, item, pos):
-        x, y, z = pos
-
-        if (x + item.dx > self.width or
-            y + item.dy > self.depth or
-            z + item.dz > self.height):
-            return False
-
-        for placed_item in container['placed']:
-            pi = placed_item['item']
-            px, py, pz = placed_item['x'], placed_item['y'], placed_item['z']
-
-            if not (x + item.dx <= px or x >= px + pi.dx or
-                    y + item.dy <= py or y >= py + pi.dy or
-                    z + item.dz <= pz or z >= pz + pi.dz):
-                return False
-
-        # Tambahan: pastikan alas ditopang
-        if z == 0:
-            return True  # Sudah di lantai
-
-        # Periksa apakah alas ditopang oleh item lain
-        supported = False
-        for px in range(x, x + item.dx):
-            for py in range(y, y + item.dy):
-                supported_here = False
-                for placed in container['placed']:
-                    pi = placed['item']
-                    bx, by, bz = placed['x'], placed['y'], placed['z']
-                    if (bx <= px < bx + pi.dx and
-                        by <= py < by + pi.dy and
-                        bz + pi.dz == z):  # Harus pas tepat di bawah
-                        supported_here = True
-                        break
-                if not supported_here:
-                    return False  # Titik di bawah tidak ditopang
-        return True
-
 
     def step(self):
         if not self.unplaced:
@@ -103,62 +65,42 @@ class ContainerPackingEnv:
         item = self.unplaced[0]
         best_fit = None
         best_score = float('inf')
-        best_container = None
         reward = 0
         info = {'placed': False, 'new_container': False}
 
-        # Coba semua container yang sudah ada
-        for container in self.containers:
+        # Urutkan container yang paling banyak terisi dulu
+        for container in sorted(self.containers, key=lambda c: -c['volume_used']):
             for orientation in item.orientations:
                 temp_item = Item(*orientation, item.weight, item.name)
 
-                # Urutkan posisi kosong berdasarkan z, y, x (bawah-kiri-depan)
-                sorted_free_spaces = sorted(container['free'], key=lambda pos: (pos[2], pos[1], pos[0]))
+                # Urutkan free space: bawah > belakang > kiri
+                sorted_free_spaces = sorted(container['free'], key=lambda pos: (pos[2], -pos[1], pos[0]))
 
                 for pos in sorted_free_spaces:
                     if self._can_place(container, temp_item, pos) and (container['weight'] + temp_item.weight <= self.max_weight_per_container):
-                        # Hitung score heuristik: rendah lebih baik
+                        # Skor heuristik: penalti space, balance, height
                         center_x = self.width / 2
                         center_y = self.depth / 2
-
-                        # Posisi pusat item
                         item_center_x = pos[0] + temp_item.dx / 2
                         item_center_y = pos[1] + temp_item.dy / 2
-
-                        # Selisih posisi dari pusat kontainer (semakin jauh, semakin tidak seimbang)
                         x_offset = abs(item_center_x - center_x)
                         y_offset = abs(item_center_y - center_y)
+                        balance_penalty = (x_offset / center_x + y_offset / center_y) * 100
+                        height_penalty = (pos[2] / self.height) ** 2 * 200
+                        space_left = self.width * self.depth * self.height - (container['volume_used'] + temp_item.volume)
 
-                        # Penalti keseimbangan (semakin jauh dari pusat, skor makin jelek)
-                        balance_penalty = (x_offset / center_x + y_offset / center_y) * 100  # skala bisa disesuaikan
-
-                        # Penalti tinggi seperti sebelumnya
-                        height_penalty = pos[2] / self.height * 100
-
-                        # Sisa ruang sebagai penalti dasar
-                        space_left = (
-                            self.width * self.depth * self.height -
-                            (container['volume_used'] + temp_item.volume)
-                        )
-
-                        # Total skor
                         score = space_left + balance_penalty + height_penalty
-
 
                         if score < best_score:
                             best_score = score
                             best_fit = (container, temp_item, pos)
-                        break  # Ambil satu spot terbaik untuk orientasi ini
+                        break  # hanya ambil 1 posisi terbaik dari orientasi ini
 
+        # Jika ada posisi ideal
         if best_fit:
             container, temp_item, pos = best_fit
             self.unplaced.pop(0)
-            container['placed'].append({
-                'item': temp_item,
-                'x': pos[0],
-                'y': pos[1],
-                'z': pos[2]
-            })
+            container['placed'].append({'item': temp_item, 'x': pos[0], 'y': pos[1], 'z': pos[2]})
             container['weight'] += temp_item.weight
             container['volume_used'] += temp_item.volume
             self.placed_items.append(temp_item)
@@ -171,38 +113,148 @@ class ContainerPackingEnv:
             info['placed'] = True
             return self._get_state(), reward, len(self.unplaced) == 0, info
 
-        # Jika tidak bisa ditempatkan di kontainer manapun, buat kontainer baru
+        # 🔁 Fallback ke semua posisi mungkin (dengan validasi tidak mengambang)
+        for container in self.containers:
+            for orientation in item.orientations:
+                temp_item = Item(*orientation, item.weight, item.name)
+
+                for pos in sorted(container['free'], key=lambda p: (p[2], p[1], p[0])):
+                    if self._can_place(container, temp_item, pos) and (container['weight'] + temp_item.weight <= self.max_weight_per_container):
+                        # Tempatkan secara paksa tapi tetap realistis (tidak overlap + didukung bawah)
+                        self.unplaced.pop(0)
+                        container['placed'].append({'item': temp_item, 'x': pos[0], 'y': pos[1], 'z': pos[2]})
+                        container['weight'] += temp_item.weight
+                        container['volume_used'] += temp_item.volume
+                        self.placed_items.append(temp_item)
+                        self._update_free_spaces(container, pos, temp_item)
+
+                        volume_utilization = temp_item.volume / (self.width * self.depth * self.height)
+                        height_penalty = pos[2] / self.height * 0.2
+                        reward = volume_utilization * (1 - height_penalty)
+
+                        info['placed'] = True
+                        return self._get_state(), reward, len(self.unplaced) == 0, info
+
+        # Jika semua gagal, buat container baru
         if len(self.containers) < self.max_containers:
-            if self._add_new_container():
-                info['new_container'] = True
-                return self.step()
+            new_container = {
+                'placed': [],
+                'free': [(0, 0, 0)],
+                'volume_used': 0,
+                'weight': 0,
+                'id': len(self.containers) + 1
+            }
+            self.containers.append(new_container)
+            info['new_container'] = True
+            return self.step()
+        if len(container['placed']) == 0:
+            temp_item = item
+            self.unplaced.pop(0)
+            container['placed'].append({'item': temp_item, 'x': 0, 'y': 0, 'z': 0})
+            container['weight'] += temp_item.weight
+            container['volume_used'] += temp_item.volume
+            self.placed_items.append(temp_item)
+            self._update_free_spaces(container, (0, 0, 0), temp_item)
+            return self._get_state(), 0.1, len(self.unplaced) == 0, {'placed': True}
 
-        return self._get_state(), 0, len(self.unplaced) == 0, info
-
-    def _can_place(self, container, item, pos):
+        # Gagal total
+        return self._get_state(), reward, True, info
+    
+    def _fits_without_overlap(self, container, item, pos):
         x, y, z = pos
-        if (x + item.dx > self.width or
-            y + item.dy > self.depth or
-            z + item.dz > self.height):
+
+        # 1. Cek apakah keluar batas container
+        if (x + item.dx > self.width) or (y + item.dy > self.depth) or (z + item.dz > self.height):
             return False
 
-        for placed_item in container['placed']:
-            pi = placed_item['item']
-            px, py, pz = placed_item['x'], placed_item['y'], placed_item['z']
+        # 2. Cek apakah overlap dengan item lain
+        for placed in container['placed']:
+            px, py, pz = placed['x'], placed['y'], placed['z']
+            pitem = placed['item']
+            if not (
+                x + item.dx <= px or x >= px + pitem.dx or
+                y + item.dy <= py or y >= py + pitem.dy or
+                z + item.dz <= pz or z >= pz + pitem.dz
+            ):
+                return False
 
-            if not (x + item.dx <= px or x >= px + pi.dx or
-                    y + item.dy <= py or y >= py + pi.dy or
-                    z + item.dz <= pz or z >= pz + pi.dz):
+        # 3. Cek apakah ada dukungan dari bawah (tidak mengambang)
+        if z > 0:
+            supported = any(
+                (placed['z'] + placed['item'].dz == z) and
+                not (
+                    x + item.dx <= placed['x'] or x >= placed['x'] + placed['item'].dx or
+                    y + item.dy <= placed['y'] or y >= placed['y'] + placed['item'].dy
+                )
+                for placed in container['placed']
+            )
+            if not supported:
                 return False
 
         return True
+
+
+    def _can_place(self, container, item, pos, support_ratio_threshold=0.01, sampling_step=None):
+        x, y, z = pos
+
+        if x + item.dx > self.width or y + item.dy > self.depth or z + item.dz > self.height:
+            return False
+
+        # Periksa overlap
+        for placed in container['placed']:
+            px, py, pz = placed['x'], placed['y'], placed['z']
+            pi = placed['item']
+            if not (
+                x + item.dx <= px or px + pi.dx <= x or
+                y + item.dy <= py or py + pi.dy <= y or
+                z + item.dz <= pz or pz + pi.dz <= z
+            ):
+                return False
+
+        if z == 0:
+            return True
+
+        # Sampling bawah item
+        sampling_step = sampling_step or max(1, min(item.dx, item.dy) // 4)
+
+        supported_points = 0
+        total_points = 0
+        for dx in range(0, item.dx + 1, sampling_step):
+            for dy in range(0, item.dy + 1, sampling_step):
+                total_points += 1
+                sample_x = x + dx
+                sample_y = y + dy
+                supported = False
+                for placed in container['placed']:
+                    px, py, pz = placed['x'], placed['y'], placed['z']
+                    pi = placed['item']
+                    if (
+                        pz + pi.dz == z and
+                        px <= sample_x < px + pi.dx and
+                        py <= sample_y < py + pi.dy
+                    ):
+                        supported = True
+                        break
+                if supported:
+                    supported_points += 1
+
+        support_ratio = supported_points / total_points if total_points else 0
+        return support_ratio >= support_ratio_threshold
+
+
+
+
 
     def _update_free_spaces(self, container, pos, item):
         x, y, z = pos
         new_free_spaces = [
             (x + item.dx, y, z),
             (x, y + item.dy, z),
-            (x, y, z + item.dz)
+            (x, y, z + item.dz),
+            (x + item.dx, y + item.dy, z),     # sudut kanan belakang bawah
+            (x + item.dx, y, z + item.dz),     # sudut kanan bawah atas
+            (x, y + item.dy, z + item.dz),     # sudut belakang bawah atas
+            (x + item.dx, y + item.dy, z + item.dz), # sudut kanan belakang atas
         ]
 
         for space in new_free_spaces:
@@ -217,6 +269,7 @@ class ContainerPackingEnv:
             container['free'].remove(pos)
 
         self._remove_redundant_spaces(container)
+
 
     def _is_space_available(self, container, space):
         for placed_item in container['placed']:
@@ -366,9 +419,9 @@ if __name__ == "__main__":
     H = 259.0  # Tinggi maksimum (dalam cm, ~2.6m)
     
     items = [
-        *[Item(15, 30, 20, 6, "Box1") for _ in range(200)],
+        *[Item(15, 200, 20, 6, "Box1") for _ in range(200)],
         *[Item(150, 30, 30, 10, "Box2") for _ in range(100)],
-        *[Item(40, 40, 100, 7, "Box3") for _ in range(50)]
+        *[Item(50, 50, 100, 7, "Box3") for _ in range(50)]
     ]
     
     # Filter item yang tidak muat dalam container

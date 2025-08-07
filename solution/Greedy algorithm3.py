@@ -113,7 +113,7 @@ class ContainerPackingEnv:
                 temp_item = Item(*orientation, item.weight, item.name)
 
                 # Urutkan posisi kosong berdasarkan z, y, x (bawah-kiri-depan)
-                sorted_free_spaces = sorted(container['free'], key=lambda pos: (pos[2], pos[1], pos[0]))
+                sorted_free_spaces = sorted(container['free'], key=lambda pos: (pos[2], -pos[1], pos[0]))
 
                 for pos in sorted_free_spaces:
                     if self._can_place(container, temp_item, pos) and (container['weight'] + temp_item.weight <= self.max_weight_per_container):
@@ -148,7 +148,7 @@ class ContainerPackingEnv:
                         if score < best_score:
                             best_score = score
                             best_fit = (container, temp_item, pos)
-                        break  # Ambil satu spot terbaik untuk orientasi ini
+                        continue  # Ambil satu spot terbaik untuk orientasi ini
 
         if best_fit:
             container, temp_item, pos = best_fit
