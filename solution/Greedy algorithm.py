@@ -24,11 +24,12 @@ class Item:
         return self.name
 
 class ContainerPackingEnv:
-    def __init__(self, container_size=(10, 10, 10), items=[], max_containers=10):
+    def __init__(self, container_size=(10, 10, 10), items=[], max_containers=10, max_weight_per_container=3000):
         self.container_size = container_size
         self.width, self.depth, self.height = container_size
         self.items = sorted(items, key=lambda x: (-x.volume, -x.weight))
         self.max_containers = max_containers
+        self.max_weight_per_container = max_weight_per_container  # ⬅️ Tambahan
         self.reset()
 
     def reset(self):
@@ -60,52 +61,83 @@ class ContainerPackingEnv:
             return self._get_state(), 0, True, {}
 
         item = self.unplaced[0]
-        placed = False
+        best_fit = None
+        best_score = float('inf')
+        best_container = None
         reward = 0
         info = {'placed': False, 'new_container': False}
 
-        # Coba semua kemungkinan orientasi di container saat ini
-        current_container = self.containers[-1]
-        for orientation in item.orientations:
-            temp_item = Item(*orientation, item.weight, item.name)
-            
-            for free_idx, pos in enumerate(current_container['free']):
-                if self._can_place(current_container, temp_item, pos):
-                    self.unplaced.pop(0)
-                    current_container['placed'].append({
-                        'item': temp_item,
-                        'x': pos[0],
-                        'y': pos[1],
-                        'z': pos[2]
-                    })
-                    current_container['weight'] += temp_item.weight
-                    current_container['volume_used'] += temp_item.volume
-                    self.placed_items.append(temp_item)
-                    self._update_free_spaces(current_container, pos, temp_item)
+        # Coba semua container yang sudah ada
+        for container in self.containers:
+            for orientation in item.orientations:
+                temp_item = Item(*orientation, item.weight, item.name)
 
-                    volume_utilization = temp_item.volume / (self.width * self.depth * self.height)
-                    height_penalty = pos[2] / self.height * 0.2
-                    reward = volume_utilization * (1 - height_penalty)
+                # Urutkan posisi kosong berdasarkan z, y, x (bawah-kiri-depan)
+                sorted_free_spaces = sorted(container['free'], key=lambda pos: (pos[2], pos[1], pos[0]))
 
-                    placed = True
-                    info['placed'] = True
-                    break
-            if placed:
-                break
+                for pos in sorted_free_spaces:
+                    if self._can_place(container, temp_item, pos) and (container['weight'] + temp_item.weight <= self.max_weight_per_container):
+                        # Hitung score heuristik: rendah lebih baik
+                        center_x = self.width / 2
+                        center_y = self.depth / 2
 
-        if not placed:
-            # Jika tidak bisa ditempatkan di container saat ini, buat container baru
-            if len(self.containers) < self.max_containers:
-                if self._add_new_container():
-                    info['new_container'] = True
-                    # Coba lagi dengan container baru
-                    return self.step()
-            else:
-                # Jika tidak bisa menambahkan container baru
-                pass
+                        # Posisi pusat item
+                        item_center_x = pos[0] + temp_item.dx / 2
+                        item_center_y = pos[1] + temp_item.dy / 2
 
-        done = len(self.unplaced) == 0
-        return self._get_state(), reward, done, info
+                        # Selisih posisi dari pusat kontainer (semakin jauh, semakin tidak seimbang)
+                        x_offset = abs(item_center_x - center_x)
+                        y_offset = abs(item_center_y - center_y)
+
+                        # Penalti keseimbangan (semakin jauh dari pusat, skor makin jelek)
+                        balance_penalty = (x_offset / center_x + y_offset / center_y) * 100  # skala bisa disesuaikan
+
+                        # Penalti tinggi seperti sebelumnya
+                        height_penalty = pos[2] / self.height * 100
+
+                        # Sisa ruang sebagai penalti dasar
+                        space_left = (
+                            self.width * self.depth * self.height -
+                            (container['volume_used'] + temp_item.volume)
+                        )
+
+                        # Total skor
+                        score = space_left + balance_penalty + height_penalty
+
+
+                        if score < best_score:
+                            best_score = score
+                            best_fit = (container, temp_item, pos)
+                        break  # Ambil satu spot terbaik untuk orientasi ini
+
+        if best_fit:
+            container, temp_item, pos = best_fit
+            self.unplaced.pop(0)
+            container['placed'].append({
+                'item': temp_item,
+                'x': pos[0],
+                'y': pos[1],
+                'z': pos[2]
+            })
+            container['weight'] += temp_item.weight
+            container['volume_used'] += temp_item.volume
+            self.placed_items.append(temp_item)
+            self._update_free_spaces(container, pos, temp_item)
+
+            volume_utilization = temp_item.volume / (self.width * self.depth * self.height)
+            height_penalty = pos[2] / self.height * 0.2
+            reward = volume_utilization * (1 - height_penalty)
+
+            info['placed'] = True
+            return self._get_state(), reward, len(self.unplaced) == 0, info
+
+        # Jika tidak bisa ditempatkan di kontainer manapun, buat kontainer baru
+        if len(self.containers) < self.max_containers:
+            if self._add_new_container():
+                info['new_container'] = True
+                return self.step()
+
+        return self._get_state(), 0, len(self.unplaced) == 0, info
 
     def _can_place(self, container, item, pos):
         x, y, z = pos
@@ -207,9 +239,15 @@ def visualize_all_containers(env):
         
         # Gambar outline container dengan label info
         draw_container_outline(ax, origin=(offset_x, 0, 0), width=env.width, depth=env.depth, height=env.height)
+        max_weight = env.max_weight_per_container
+        total_weight = container['weight']
+
         ax.text(offset_x + env.width/2, -env.depth*0.2, env.height*0.5,
-               f"Container {container_idx+1}\nUtilization: {utilization:.1f}%\nItems: {num_items}",
-               color='blue', ha='center', va='center', fontsize=9, bbox=dict(facecolor='white', alpha=0.8))
+            f"Container {container_idx+1}\n"
+            f"Utilization: {utilization:.1f}%\n"
+            f"Items: {num_items}\n"
+            f"Weight: {total_weight:.1f} / {max_weight} kg",
+            color='blue', ha='center', va='center', fontsize=9, bbox=dict(facecolor='white', alpha=0.8))
 
         for placement in container['placed']:
             item = placement['item']
@@ -275,9 +313,9 @@ if __name__ == "__main__":
     H = 259.0  # Tinggi maksimum (dalam cm, ~2.6m)
     
     items = [
-        *[Item(15, 30, 20, 1, "Box1") for _ in range(200)],
-        *[Item(150, 30, 30, 1, "Box2") for _ in range(100)],
-        *[Item(40, 40, 100, 1, "Box3") for _ in range(50)]
+        *[Item(15, 30, 20, 6, "Box1") for _ in range(200)],
+        *[Item(150, 30, 30, 10, "Box2") for _ in range(100)],
+        *[Item(40, 40, 100, 7, "Box3") for _ in range(50)]
     ]
     
     # Filter item yang tidak muat dalam container
@@ -293,7 +331,7 @@ if __name__ == "__main__":
         else:
             print(f"Item {item.name} dengan dimensi {item.dx}x{item.dy}x{item.dz} tidak muat dalam container dalam orientasi apapun")
     
-    env = ContainerPackingEnv(container_size=(D, L, H), items=valid_items, max_containers=10)
+    env = ContainerPackingEnv(container_size=(D, L, H), items=valid_items, max_containers=10, max_weight_per_container=24000)
 
     done = False
     while not done:
