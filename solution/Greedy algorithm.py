@@ -44,7 +44,7 @@ class ContainerPackingEnv:
         if len(self.containers) >= self.max_containers:
             return False
         self.containers.append({
-            'free': [(0, 0, 0)],
+            'free': [(0, 0, 0, self.width, self.depth, self.height)],
             'placed': [],
             'weight': 0,
             'volume_used': 0
@@ -103,7 +103,6 @@ class ContainerPackingEnv:
         item = self.unplaced[0]
         best_fit = None
         best_score = float('inf')
-        best_container = None
         reward = 0
         info = {'placed': False, 'new_container': False}
 
@@ -112,25 +111,16 @@ class ContainerPackingEnv:
             for orientation in item.orientations:
                 temp_item = Item(*orientation, item.weight, item.name)
 
-                # Urutkan posisi kosong berdasarkan z, y, x (bawah-kiri-depan)
-                sorted_free_spaces = sorted(container['free'], key=lambda pos: (pos[2], pos[1], pos[0]))
+                # Urutkan ruang kosong (space) berdasarkan z, y, x
+                sorted_free_spaces = sorted(container['free'], key=lambda s: (s[2], s[1], s[0]))
 
-                for pos in sorted_free_spaces:
-                    if self._can_place(container, temp_item, pos) and (container['weight'] + temp_item.weight <= self.max_weight_per_container):
-                        # Hitung score heuristik: rendah lebih baik
-                        center_x = self.width / 2
-                        center_y = self.depth / 2
+                for space in sorted_free_spaces:
+                    # space = (sx, sy, sz, sw, sd, sh)
+                    sx, sy, sz, sw, sd, sh = space
+                    pos = (sx, sy, sz)
 
-                        # Posisi pusat item
-                        item_center_x = pos[0] + temp_item.dx / 2
-                        item_center_y = pos[1] + temp_item.dy / 2
-
-                        # Selisih posisi dari pusat kontainer (semakin jauh, semakin tidak seimbang)
-                        x_offset = abs(item_center_x - center_x)
-                        y_offset = abs(item_center_y - center_y)
-
-                        # Penalti keseimbangan (semakin jauh dari pusat, skor makin jelek)
-                        balance_penalty = (x_offset / center_x + y_offset / center_y) * 100  # skala bisa disesuaikan
+                    if self._can_place(container, temp_item, space) and \
+                    (container['weight'] + temp_item.weight <= self.max_weight_per_container):
 
                         # Penalti tinggi seperti sebelumnya
                         height_penalty = pos[2] / self.height * 100
@@ -142,16 +132,14 @@ class ContainerPackingEnv:
                         )
 
                         # Total skor
-                        score = space_left + balance_penalty + height_penalty
-
+                        score = (space_left) + (height_penalty * 0.1)
 
                         if score < best_score:
                             best_score = score
-                            best_fit = (container, temp_item, pos)
-                        break  # Ambil satu spot terbaik untuk orientasi ini
+                            best_fit = (container, temp_item, space, pos)
 
         if best_fit:
-            container, temp_item, pos = best_fit
+            container, temp_item, space, pos = best_fit
             self.unplaced.pop(0)
             container['placed'].append({
                 'item': temp_item,
@@ -162,8 +150,11 @@ class ContainerPackingEnv:
             container['weight'] += temp_item.weight
             container['volume_used'] += temp_item.volume
             self.placed_items.append(temp_item)
-            self._update_free_spaces(container, pos, temp_item)
 
+            # Update ruang kosong
+            self._update_free_spaces(container, space, pos, temp_item)
+
+            # Hitung reward
             volume_utilization = temp_item.volume / (self.width * self.depth * self.height)
             height_penalty = pos[2] / self.height * 0.2
             reward = volume_utilization * (1 - height_penalty)
@@ -179,55 +170,76 @@ class ContainerPackingEnv:
 
         return self._get_state(), 0, len(self.unplaced) == 0, info
 
-    def _can_place(self, container, item, pos):
-        x, y, z = pos
-        if (x + item.dx > self.width or
-            y + item.dy > self.depth or
-            z + item.dz > self.height):
+
+    def _can_place(self, container, item, space):
+        # space sekarang formatnya: (x, y, z, w, d, h)
+        sx, sy, sz, sw, sd, sh = space
+
+        # Pastikan muat dalam ruang kosong ini
+        if item.dx > sw or item.dy > sd or item.dz > sh:
             return False
 
+        # Pastikan tidak keluar dari ukuran kontainer
+        if sx + item.dx > self.width or sy + item.dy > self.depth or sz + item.dz > self.height:
+            return False
+
+        # Cek tabrakan dengan barang yang sudah ada
         for placed_item in container['placed']:
             pi = placed_item['item']
             px, py, pz = placed_item['x'], placed_item['y'], placed_item['z']
 
-            if not (x + item.dx <= px or x >= px + pi.dx or
-                    y + item.dy <= py or y >= py + pi.dy or
-                    z + item.dz <= pz or z >= pz + pi.dz):
+            if not (sx + item.dx <= px or sx >= px + pi.dx or
+                    sy + item.dy <= py or sy >= py + pi.dy or
+                    sz + item.dz <= pz or sz >= pz + pi.dz):
                 return False
 
         return True
 
-    def _update_free_spaces(self, container, pos, item):
+
+    def _update_free_spaces(self, container, space, pos, item):
+        # Hapus ruang kosong lama
+        container['free'].remove(space)
+
+        sx, sy, sz, sw, sd, sh = space
         x, y, z = pos
-        new_free_spaces = [
-            (x + item.dx, y, z),
-            (x, y + item.dy, z),
-            (x, y, z + item.dz)
-        ]
 
-        for space in new_free_spaces:
-            if (space[0] < self.width and
-                space[1] < self.depth and
-                space[2] < self.height and
-                space not in container['free'] and
-                self._is_space_available(container, space)):
-                container['free'].append(space)
+        # Buat ruang di kanan
+        if x + item.dx < sx + sw:
+            container['free'].append((x + item.dx, sy, sz,
+                                    (sx + sw) - (x + item.dx), sd, sh))
 
-        if pos in container['free']:
-            container['free'].remove(pos)
+        # Buat ruang di depan
+        if y + item.dy < sy + sd:
+            container['free'].append((sx, y + item.dy, sz,
+                                    sw, (sy + sd) - (y + item.dy), sh))
 
-        self._remove_redundant_spaces(container)
+        # Buat ruang di atas
+        if z + item.dz < sz + sh:
+            container['free'].append((sx, sy, z + item.dz,
+                                    sw, sd, (sz + sh) - (z + item.dz)))
 
-    def _is_space_available(self, container, space):
-        for placed_item in container['placed']:
-            pi = placed_item['item']
-            px, py, pz = placed_item['x'], placed_item['y'], placed_item['z']
+        # Hapus ruang yang dimensinya nol atau negatif
+        container['free'] = [s for s in container['free'] if s[3] > 0 and s[4] > 0 and s[5] > 0]
+    def _is_space_available(self, container, space, item):
+        sx, sy, sz, sw, sd, sh = space
 
-            if (space[0] >= px and space[0] < px + pi.dx and
-                space[1] >= py and space[1] < py + pi.dy and
-                space[2] >= pz and space[2] < pz + pi.dz):
-                return False
-        return True
+        # Pastikan item muat di dalam blok ruang kosong
+        if item.dx <= sw and item.dy <= sd and item.dz <= sh:
+            # Cek apakah posisi ini tabrakan dengan barang lain
+            for placed in container['placed']:
+                px, py, pz = placed['x'], placed['y'], placed['z']
+                pw, pd, ph = placed['item'].dx, placed['item'].dy, placed['item'].dz
+
+                overlap_x = not (sx + item.dx <= px or sx >= px + pw)
+                overlap_y = not (sy + item.dy <= py or sy >= py + pd)
+                overlap_z = not (sz + item.dz <= pz or sz >= pz + ph)
+
+                if overlap_x and overlap_y and overlap_z:
+                    return False  # Ada tabrakan
+            return True
+
+        return False  # Tidak muat secara dimensi
+
 
     def _remove_redundant_spaces(self, container):
         to_remove = set()
@@ -367,8 +379,8 @@ if __name__ == "__main__":
     
     items = [
         *[Item(15, 30, 20, 6, "Box1") for _ in range(200)],
-        *[Item(150, 30, 30, 10, "Box2") for _ in range(100)],
-        *[Item(40, 40, 100, 7, "Box3") for _ in range(50)]
+        *[Item(150, 30, 30, 10, "Box2") for _ in range(150)],
+        *[Item(40, 40, 100, 7, "Box3") for _ in range(100)]
     ]
     
     # Filter item yang tidak muat dalam container

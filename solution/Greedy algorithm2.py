@@ -79,17 +79,17 @@ class ContainerPackingEnv:
                 for pos in sorted_free_spaces:
                     if self._can_place(container, temp_item, pos) and (container['weight'] + temp_item.weight <= self.max_weight_per_container):
                         # Skor heuristik: penalti space, balance, height
-                        center_x = self.width / 2
-                        center_y = self.depth / 2
-                        item_center_x = pos[0] + temp_item.dx / 2
-                        item_center_y = pos[1] + temp_item.dy / 2
-                        x_offset = abs(item_center_x - center_x)
-                        y_offset = abs(item_center_y - center_y)
-                        balance_penalty = (x_offset / center_x + y_offset / center_y) * 100
+                        # center_x = self.width / 2
+                        # center_y = self.depth / 4
+                        # item_center_x = pos[0] + temp_item.dx / 2
+                        # item_center_y = pos[1] + temp_item.dy / 2
+                        # x_offset = abs(item_center_x - center_x)
+                        # y_offset = abs(item_center_y - center_y)
+                        # balance_penalty = (x_offset / center_x + y_offset / center_y) * 100
                         height_penalty = (pos[2] / self.height) ** 2 * 200
                         space_left = self.width * self.depth * self.height - (container['volume_used'] + temp_item.volume)
 
-                        score = space_left + balance_penalty + height_penalty
+                        score = (space_left * 1)  + (height_penalty * 0.) #+ (balance_penalty * 0.5)
 
                         if score < best_score:
                             best_score = score
@@ -194,7 +194,7 @@ class ContainerPackingEnv:
         return True
 
 
-    def _can_place(self, container, item, pos, support_ratio_threshold=0.01, sampling_step=None):
+    def _can_place(self, container, item, pos, support_ratio_threshold=0.1, sampling_step=None):
         x, y, z = pos
 
         if x + item.dx > self.width or y + item.dy > self.depth or z + item.dz > self.height:
@@ -419,8 +419,8 @@ if __name__ == "__main__":
     H = 259.0  # Tinggi maksimum (dalam cm, ~2.6m)
     
     items = [
-        *[Item(15, 200, 20, 6, "Box1") for _ in range(200)],
-        *[Item(150, 30, 30, 10, "Box2") for _ in range(100)],
+        *[Item(20, 30, 20, 6, "Box1") for _ in range(200)],
+        *[Item(200, 30, 30, 10, "Box2") for _ in range(100)],
         *[Item(50, 50, 100, 7, "Box3") for _ in range(50)]
     ]
     
